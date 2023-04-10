@@ -226,7 +226,7 @@ impl<const N: usize> KDTree<F, (), N> {
         self.subdivide(left_child_idx, split_kind);
         self.subdivide(right_child_idx, split_kind);
     }
-    fn nearest(&self, p: &[F; N]) -> (&[F; N], ()) {
+    pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, ()) {
         const SZ: usize = 64;
         let mut stack = [&KDNode::EMPTY; SZ];
         let mut stack_ptr = 0;
@@ -284,7 +284,11 @@ impl<const N: usize> KDTree<F, (), N> {
                 }
             };
         }
-        (&self.points[curr_best.0], self.data[curr_best.0])
+        (
+            &self.points[curr_best.0],
+            curr_best.1,
+            self.data[curr_best.0],
+        )
     }
 }
 
