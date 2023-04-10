@@ -183,7 +183,7 @@ impl<const N: usize> KDTree<F, (), N> {
     fn subdivide(&mut self, idx: usize, split_kind: SplitKind) {
         let node = &self.nodes[idx];
         // TODO here can use a different amount of points so it will be faster?
-        if node.num_points <= 2 {
+        if node.num_points <= 16 {
             return;
         }
         let (axis, split_val) = match split_kind {
@@ -223,11 +223,15 @@ impl<const N: usize> KDTree<F, (), N> {
         self.nodes[left_child_idx].set_points(old_fst_pt, left_count);
         self.nodes[right_child_idx].set_points(i, num_pts - left_count);
 
+        self.update_node_bounds(left_child_idx);
+        self.update_node_bounds(right_child_idx);
+
         self.subdivide(left_child_idx, split_kind);
         self.subdivide(right_child_idx, split_kind);
     }
     pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, ()) {
-        const SZ: usize = 64;
+        const SZ: usize = 32;
+        assert_ne!(SZ, 0);
         let mut stack = [&KDNode::EMPTY; SZ];
         let mut stack_ptr = 0;
         macro_rules! push {
@@ -254,6 +258,9 @@ impl<const N: usize> KDTree<F, (), N> {
         let mut node = &self.nodes[self.root_node_idx];
         loop {
             if node.is_leaf() {
+                if node.bounds.overlaps(p, curr_best.1).is_none() {
+                    continue;
+                }
                 let fp = node.first_point();
                 for i in fp..fp + node.num_points {
                     let pt = self.points[i];
@@ -284,11 +291,9 @@ impl<const N: usize> KDTree<F, (), N> {
                 }
             };
         }
-        (
-            &self.points[curr_best.0],
-            curr_best.1,
-            self.data[curr_best.0],
-        )
+        let pt = &self.points[curr_best.0];
+        let dist = curr_best.1;
+        (pt, dist, self.data[curr_best.0])
     }
 }
 
