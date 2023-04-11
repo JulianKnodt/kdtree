@@ -1,5 +1,7 @@
+#![feature(generic_arg_infer)]
 #![feature(test)]
 extern crate test;
+
 
 type F = f32;
 
@@ -149,14 +151,33 @@ pub struct KDTree<T, Q, const N: usize> {
 pub enum SplitKind {
     /// Split along the middle of each sphere
     Midpoint,
+    Variance,
+
     MinMaxVolumeLin(usize),
     // TODO add SAH and other volume heuristic
 }
 
+fn streaming_mean_var(xs: impl Iterator<Item = F>) -> (F, F) {
+    let mut count = 0;
+    let mut avg = 0.;
+    let mut var = 0.;
+    for x in xs {
+        count += 1;
+        let delta = x - avg;
+        avg += delta / (count as F);
+        var += delta * (x - avg);
+    }
+    if count == 0 {
+        return (avg, var);
+    }
+    (avg, var)
+}
+
 impl From<()> for SplitKind {
     fn from((): ()) -> SplitKind {
+        //SplitKind::Variance
         SplitKind::Midpoint
-        //SplitKind::MinMaxVolumeLin(512)
+        //SplitKind::MinMaxVolumeLin(64)
     }
 }
 
@@ -195,6 +216,21 @@ impl<const N: usize> KDTree<F, (), N> {
         }
         let axis = aabb.largest_dimension();
         (axis, aabb.center()[axis])
+    }
+    fn variance_split(&self, node: &KDNode<N>) -> (usize, F) {
+        let (axis, mean, _) = (0..N)
+            .map(|axis| {
+                let fp = node.first_point();
+                let (mean, var) = streaming_mean_var(
+                    self.points[fp..fp + node.num_points]
+                        .iter()
+                        .map(|pt| pt[axis]),
+                );
+                (axis, mean, var)
+            })
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .unwrap();
+        (axis, mean)
     }
     fn min_max_volume_split_lin(&self, node: &KDNode<N>, bins: usize) -> (usize, F) {
         assert!(bins > 0);
@@ -242,6 +278,7 @@ impl<const N: usize> KDTree<F, (), N> {
         }
         let (axis, split_val) = match split_kind {
             SplitKind::Midpoint => self.midpoint_split(node),
+            SplitKind::Variance => self.variance_split(node),
             SplitKind::MinMaxVolumeLin(bins) => self.min_max_volume_split_lin(node, bins),
         };
         /*
@@ -392,15 +429,18 @@ fn test_correct() {
 
 #[bench]
 fn bench_kdtree(b: &mut test::Bencher) {
-    let n = 1000000;
+    let n = 10000000;
     let pts = (0..n)
         .map(|i| i as F)
-        .map(|i| [i.sin(), i.cos(), (i * 0.3).sin(), (i * 0.12).cos()]);
+        .map(|i| [i.sin(), (i * 0.07).cos(), (i * 0.3).sin(), (i * 0.12).cos()/**/]);
 
     use core::hint::black_box;
-    let kdt = KDTree::<F, (), 4>::new(pts, ());
-    let near_to = black_box([0.; 4]);
+    let kdt = KDTree::<F, (), _>::new(pts, ());
+    let mut i = 0;
     b.iter(|| {
+        i += 1;
+        let i = i as F;
+        let near_to = [i % 0.3, i % 0.21, i % 0.7, i % 0.893];
         kdt.nearest(&black_box(near_to));
     });
 }
