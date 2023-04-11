@@ -230,33 +230,31 @@ impl<const N: usize> KDTree<F, (), N> {
         self.subdivide(right_child_idx, split_kind);
     }
     pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, ()) {
-        const SZ: usize = 32;
-        assert_ne!(SZ, 0);
-        let mut stack = [&KDNode::EMPTY; SZ];
-        let mut stack_ptr = 0;
+        static mut BUF: Vec<usize> = vec![];
         macro_rules! push {
             ($n: expr) => {
-                assert!(stack_ptr < SZ);
-                stack[stack_ptr] = $n;
-                stack_ptr += 1;
+                unsafe {
+                  BUF.push($n);
+                }
             };
         }
 
         macro_rules! pop {
             () => {
-                if stack_ptr == 0 {
+                unsafe {
+                  let Some(n) = BUF.pop() else {
                     break;
-                } else {
-                    stack_ptr -= 1;
-                    assert_ne!(stack[stack_ptr], &KDNode::EMPTY);
-                    stack[stack_ptr]
+                  };
+                  &self.nodes[n]
                 }
             };
         }
 
+        assert!(unsafe { BUF.is_empty() });
         let mut curr_best = (0, F::INFINITY);
-        let mut node = &self.nodes[self.root_node_idx];
+        push!(self.root_node_idx);
         loop {
+            let node = pop!();
             if node.is_leaf() {
                 if node.bounds.overlaps(p, curr_best.1).is_none() {
                     continue;
@@ -269,24 +267,23 @@ impl<const N: usize> KDTree<F, (), N> {
                         curr_best = (i, d);
                     }
                 }
-                node = pop!();
                 continue;
             }
             let c1 = &self.nodes[node.left_child()];
             let c2 = &self.nodes[node.right_child()];
             let d1 = c1.bounds.overlaps(p, curr_best.1);
             let d2 = c2.bounds.overlaps(p, curr_best.1);
-            node = match (d1, d2) {
-                (None, None) => pop!(),
-                (None, Some(_)) => c2,
-                (Some(_), None) => c1,
+            match (d1, d2) {
+                (None, None) => {},
+                (None, Some(_)) => push!(node.right_child()),
+                (Some(_), None) => push!(node.left_child()),
                 (Some(d1), Some(d2)) => {
                     if d1 < d2 {
-                        push!(c2);
-                        c1
+                        push!(node.right_child());
+                        push!(node.left_child());
                     } else {
-                        push!(c1);
-                        c2
+                        push!(node.left_child());
+                        push!(node.right_child());
                     }
                 }
             };
