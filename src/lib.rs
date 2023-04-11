@@ -1,6 +1,9 @@
-#![allow(unused)]
+#![feature(test)]
+extern crate test;
+
 type F = f32;
 
+#[inline]
 fn dist_sq<const N: usize>(a: &[F; N], b: &[F; N]) -> F {
     let mut d = 0.;
     for i in 0..N {
@@ -10,6 +13,7 @@ fn dist_sq<const N: usize>(a: &[F; N], b: &[F; N]) -> F {
     d
 }
 
+#[inline]
 fn dist<const N: usize>(a: &[F; N], b: &[F; N]) -> F {
     dist_sq(a, b).sqrt()
 }
@@ -34,9 +38,15 @@ impl<const N: usize> AABB<N> {
     pub fn center(&self) -> [F; N] {
         std::array::from_fn(|i| (self.min[i] + self.max[i]) / 2.)
     }
+    #[inline]
     pub fn extent_length(&self) -> F {
         dist(&self.max, &self.min)
     }
+    #[inline]
+    pub fn extent(&self) -> [F; N] {
+        std::array::from_fn(|i| self.max[i] - self.min[i])
+    }
+    #[inline]
     pub fn to_sphere(&self) -> Sphere<N> {
         Sphere {
             center: self.center(),
@@ -64,14 +74,15 @@ impl<const N: usize> Sphere<N> {
         radius: F::INFINITY,
     };
     // If it overlaps, returns the distance to the sphere
+    #[inline]
     fn overlaps(&self, pt: &[F; N], rad: F) -> Option<F> {
         let d = dist(&self.center, pt);
-        if d <= rad + self.radius {
-            Some(d - self.radius)
-        } else {
-            None
-        }
+        debug_assert!(rad >= 0.);
+        debug_assert!(self.radius >= 0.);
+        let sub_d = d - self.radius;
+        (sub_d < rad).then_some(sub_d)
     }
+
     fn volume(&self) -> F {
         const PI: F = std::f64::consts::PI as F;
         4. / 3. * PI * self.radius * self.radius * self.radius
@@ -93,22 +104,26 @@ impl<const N: usize> KDNode<N> {
         num_points: 0,
     };
 
+    #[inline]
     fn right_child(&self) -> usize {
-        assert!(!self.is_leaf());
+        debug_assert!(!self.is_leaf());
         self.left_child() + 1
     }
+    #[inline]
+    fn left_child(&self) -> usize {
+        debug_assert!(!self.is_leaf());
+        self.left_child_or_first_point
+    }
+
     fn is_leaf(&self) -> bool {
         self.num_points > 0
     }
+
     fn set_left_child(&mut self, left_child: usize) -> (usize, usize) {
         assert!(self.is_leaf());
         let old_first_pt = std::mem::replace(&mut self.left_child_or_first_point, left_child);
         let num_prims = std::mem::take(&mut self.num_points);
         (old_first_pt, num_prims)
-    }
-    fn left_child(&self) -> usize {
-        assert!(!self.is_leaf());
-        self.left_child_or_first_point
     }
     fn first_point(&self) -> usize {
         assert!(self.is_leaf());
@@ -134,12 +149,14 @@ pub struct KDTree<T, Q, const N: usize> {
 pub enum SplitKind {
     /// Split along the middle of each sphere
     Midpoint,
+    MinMaxVolumeLin(usize),
     // TODO add SAH and other volume heuristic
 }
 
 impl From<()> for SplitKind {
     fn from((): ()) -> SplitKind {
         SplitKind::Midpoint
+        //SplitKind::MinMaxVolumeLin(512)
     }
 }
 
@@ -158,6 +175,7 @@ impl<const N: usize> KDTree<F, (), N> {
         s.nodes[0].num_points = s.points.len();
         s.update_node_bounds(0);
         s.subdivide(0, split.into());
+        s.nodes.truncate(s.nodes_used);
         s
     }
     fn update_node_bounds(&mut self, idx: usize) {
@@ -167,9 +185,7 @@ impl<const N: usize> KDTree<F, (), N> {
         for p in &self.points[fp..fp + node.num_points] {
             aabb.add_point(p);
         }
-        let mut sphere = aabb.to_sphere();
-        sphere.radius += 1e-7;
-        node.bounds = sphere;
+        node.bounds = aabb.to_sphere();
     }
     fn midpoint_split(&self, node: &KDNode<N>) -> (usize, F) {
         let mut aabb = AABB::EMPTY;
@@ -180,14 +196,53 @@ impl<const N: usize> KDTree<F, (), N> {
         let axis = aabb.largest_dimension();
         (axis, aabb.center()[axis])
     }
+    fn min_max_volume_split_lin(&self, node: &KDNode<N>, bins: usize) -> (usize, F) {
+        assert!(bins > 0);
+        let mut aabb = AABB::EMPTY;
+        let fp = node.first_point();
+        for p in &self.points[fp..fp + node.num_points] {
+            aabb.add_point(p);
+        }
+        let (axis, best_pos, _) = (0..N)
+            .map(|axis| {
+                let (best_pos, min_max_vol) = (0..bins)
+                    .map(|i| {
+                        let frac = (i as F) / (bins as F);
+                        let split_pt = aabb.min[axis] + frac * aabb.extent()[axis];
+                        let mut left_aabb = AABB::EMPTY;
+                        let mut right_aabb = AABB::EMPTY;
+                        let fp = node.first_point();
+                        for p in &self.points[fp..fp + node.num_points] {
+                            if p[axis] < split_pt {
+                                left_aabb.add_point(p);
+                            } else {
+                                right_aabb.add_point(p);
+                            }
+                        }
+                        let vol = left_aabb
+                            .to_sphere()
+                            .volume()
+                            .max(right_aabb.to_sphere().volume());
+                        (split_pt, vol)
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .unwrap();
+                (axis, best_pos, min_max_vol)
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .unwrap();
+
+        (axis, best_pos)
+    }
     fn subdivide(&mut self, idx: usize, split_kind: SplitKind) {
         let node = &self.nodes[idx];
         // TODO here can use a different amount of points so it will be faster?
-        if node.num_points <= 16 {
+        if node.num_points <= 8 {
             return;
         }
         let (axis, split_val) = match split_kind {
             SplitKind::Midpoint => self.midpoint_split(node),
+            SplitKind::MinMaxVolumeLin(bins) => self.min_max_volume_split_lin(node, bins),
         };
         /*
         let (cost,axis,split_pos) = self.sah_linplace_split_binned::<2048>(node);
@@ -230,51 +285,59 @@ impl<const N: usize> KDTree<F, (), N> {
         self.subdivide(right_child_idx, split_kind);
     }
     pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, ()) {
-        static mut BUF: Vec<usize> = vec![];
+        let mut heap = vec![];
+        const SZ: usize = 32;
+        let mut stack = [0; SZ];
+        let mut stack_ptr = 0;
         macro_rules! push {
-            ($n: expr) => {
-                unsafe {
-                  BUF.push($n);
+            ($n: expr) => {{
+                if stack_ptr == SZ {
+                    heap.push($n);
+                } else {
+                    unsafe {
+                        *stack.get_unchecked_mut(stack_ptr) = $n;
+                    }
+                    stack_ptr += 1;
                 }
-            };
+            }};
         }
 
         macro_rules! pop {
-            () => {
-                unsafe {
-                  let Some(n) = BUF.pop() else {
+            () => {{
+                let n = if let Some(n) = heap.pop() {
+                    n
+                } else if stack_ptr == 0 {
                     break;
-                  };
-                  &self.nodes[n]
-                }
-            };
+                } else {
+                    stack_ptr -= 1;
+                    unsafe { *stack.get_unchecked(stack_ptr) }
+                };
+                unsafe { self.nodes.get_unchecked(n) }
+            }};
         }
 
-        assert!(unsafe { BUF.is_empty() });
         let mut curr_best = (0, F::INFINITY);
         push!(self.root_node_idx);
         loop {
             let node = pop!();
             if node.is_leaf() {
-                if node.bounds.overlaps(p, curr_best.1).is_none() {
-                    continue;
-                }
                 let fp = node.first_point();
                 for i in fp..fp + node.num_points {
-                    let pt = self.points[i];
+                    let pt = unsafe { self.points.get_unchecked(i) };
                     let d = dist(&pt, p);
                     if d < curr_best.1 {
-                        curr_best = (i, d);
+                        curr_best = (i, d - 1e-9);
                     }
                 }
                 continue;
             }
-            let c1 = &self.nodes[node.left_child()];
-            let c2 = &self.nodes[node.right_child()];
+            let c1 = unsafe { &self.nodes.get_unchecked(node.left_child()) };
+            let c2 = unsafe { &self.nodes.get_unchecked(node.right_child()) };
             let d1 = c1.bounds.overlaps(p, curr_best.1);
             let d2 = c2.bounds.overlaps(p, curr_best.1);
+
             match (d1, d2) {
-                (None, None) => {},
+                (None, None) => {}
                 (None, Some(_)) => push!(node.right_child()),
                 (Some(_), None) => push!(node.left_child()),
                 (Some(d1), Some(d2)) => {
@@ -288,6 +351,7 @@ impl<const N: usize> KDTree<F, (), N> {
                 }
             };
         }
+
         let pt = &self.points[curr_best.0];
         let dist = curr_best.1;
         (pt, dist, self.data[curr_best.0])
@@ -296,6 +360,16 @@ impl<const N: usize> KDTree<F, (), N> {
 
 #[test]
 fn test_new_kdtree() {
+    let pts = (0..100000).map(|i| [(i as F).sin(), (i as F).cos()]);
+    let kdt = KDTree::<F, (), 2>::new(pts, ());
+    println!("{:?}", kdt.nodes_used);
+
+    let f = kdt.nearest(&[0.1; 2]);
+    println!("GOT {f:?}");
+}
+
+#[test]
+fn test_correct() {
     for n in 1..=100 {
         let pts = (0..n).map(|i| [(i as F).sin(), (i as F).cos()]);
         let kdt = KDTree::<F, (), 2>::new(pts, ());
@@ -314,4 +388,19 @@ fn test_new_kdtree() {
             assert!((d0 - d1).abs() < 1e-5);
         }
     }
+}
+
+#[bench]
+fn bench_kdtree(b: &mut test::Bencher) {
+    let n = 1000000;
+    let pts = (0..n)
+        .map(|i| i as F)
+        .map(|i| [i.sin(), i.cos(), (i * 0.3).sin(), (i * 0.12).cos()]);
+
+    use core::hint::black_box;
+    let kdt = KDTree::<F, (), 4>::new(pts, ());
+    let near_to = black_box([0.; 4]);
+    b.iter(|| {
+        kdt.nearest(&black_box(near_to));
+    });
 }
