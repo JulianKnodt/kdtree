@@ -369,7 +369,10 @@ impl<const N: usize, T> KDTree<F, T, N> {
                     let pt = unsafe { self.points.get_unchecked(i) };
                     let d = dist(&pt, p);
                     if d < curr_best.1 {
-                        curr_best = (i, d - 1e-9);
+                        curr_best = (i, (d - 1e-9).max(0.));
+                    }
+                    if curr_best.1 == 0. {
+                        break;
                     }
                 }
                 continue;
