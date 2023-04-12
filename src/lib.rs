@@ -2,7 +2,6 @@
 #![feature(test)]
 extern crate test;
 
-
 type F = f32;
 
 #[inline]
@@ -181,17 +180,17 @@ impl From<()> for SplitKind {
     }
 }
 
-impl<const N: usize> KDTree<F, (), N> {
-    pub fn new(pts: impl Iterator<Item = [F; N]>, split: impl Into<SplitKind>) -> Self {
-        let points = pts.collect::<Vec<_>>();
+impl<const N: usize, T> KDTree<F, T, N> {
+    pub fn new(pts: impl Iterator<Item = ([F; N], T)>, split: impl Into<SplitKind>) -> Self {
+        let (points, data): (Vec<_>, Vec<_>) = pts.unzip();
         let size = 2 * points.len() + 1;
         let nodes = vec![KDNode::EMPTY; size];
         let mut s = Self {
-            data: vec![(); points.len()],
             nodes,
             root_node_idx: 0,
             nodes_used: 1,
             points,
+            data,
         };
         s.nodes[0].num_points = s.points.len();
         s.update_node_bounds(0);
@@ -321,7 +320,11 @@ impl<const N: usize> KDTree<F, (), N> {
         self.subdivide(left_child_idx, split_kind);
         self.subdivide(right_child_idx, split_kind);
     }
-    pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, ()) {
+    #[inline]
+    pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, &T) {
+        self.nearest_filter(p, |_| true)
+    }
+    pub fn nearest_filter(&self, p: &[F; N], filter: impl Fn(&T) -> bool) -> (&[F; N], F, &T) {
         let mut heap = vec![];
         const SZ: usize = 32;
         let mut stack = [0; SZ];
@@ -360,6 +363,9 @@ impl<const N: usize> KDTree<F, (), N> {
             if node.is_leaf() {
                 let fp = node.first_point();
                 for i in fp..fp + node.num_points {
+                    if !filter(&self.data[i]) {
+                        continue;
+                    }
                     let pt = unsafe { self.points.get_unchecked(i) };
                     let d = dist(&pt, p);
                     if d < curr_best.1 {
@@ -391,7 +397,7 @@ impl<const N: usize> KDTree<F, (), N> {
 
         let pt = &self.points[curr_best.0];
         let dist = curr_best.1;
-        (pt, dist, self.data[curr_best.0])
+        (pt, dist, &self.data[curr_best.0])
     }
 }
 
@@ -430,9 +436,14 @@ fn test_correct() {
 #[bench]
 fn bench_kdtree(b: &mut test::Bencher) {
     let n = 10000000;
-    let pts = (0..n)
-        .map(|i| i as F)
-        .map(|i| [i.sin(), (i * 0.07).cos(), (i * 0.3).sin(), (i * 0.12).cos()/**/]);
+    let pts = (0..n).map(|i| i as F).map(|i| {
+        [
+            i.sin(),
+            (i * 0.07).cos(),
+            (i * 0.3).sin(),
+            (i * 0.12).cos(), /**/
+        ]
+    });
 
     use core::hint::black_box;
     let kdt = KDTree::<F, (), _>::new(pts, ());
