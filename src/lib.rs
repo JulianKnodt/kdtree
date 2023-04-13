@@ -198,6 +198,11 @@ impl<const N: usize, T> KDTree<F, T, N> {
         s.nodes.truncate(s.nodes_used);
         s
     }
+    /// Returns the number of points in this KD-tree
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
     fn update_node_bounds(&mut self, idx: usize) {
         let node = &mut self.nodes[idx];
         let mut aabb = AABB::EMPTY;
@@ -325,11 +330,12 @@ impl<const N: usize, T> KDTree<F, T, N> {
         self.nearest_filter(p, |_| true)
     }
     pub fn nearest_filter(&self, p: &[F; N], filter: impl Fn(&T) -> bool) -> (&[F; N], F, &T) {
-        self.nearest_filter_top_k::<1>(p, filter)[0]
+        self.nearest_filter_top_k::<1>(p, F::INFINITY, filter)[0]
     }
     pub fn nearest_filter_top_k<const K: usize>(
         &self,
         p: &[F; N],
+        ball_radius: F,
         filter: impl Fn(&T) -> bool,
     ) -> [(&[F; N], F, &T); K] {
         if K == 0 {
@@ -366,8 +372,9 @@ impl<const N: usize, T> KDTree<F, T, N> {
                 unsafe { self.nodes.get_unchecked(n) }
             }};
         }
+        const EMPTY: usize = usize::MAX;
 
-        let mut curr_bests = [(0, F::INFINITY); K];
+        let mut curr_bests = [(EMPTY, ball_radius); K];
         push!(self.root_node_idx);
         loop {
             let node = pop!();
@@ -381,6 +388,7 @@ impl<const N: usize, T> KDTree<F, T, N> {
                     let d = dist(&pt, p);
                     if d < curr_bests[K - 1].1 {
                         curr_bests[K - 1] = (i, (d - 1e-9).max(0.));
+                        curr_bests.sort_by(|a, b| a.1.total_cmp(&b.1));
                     }
                     if curr_bests[K - 1].1 == 0. {
                         break;
@@ -409,7 +417,13 @@ impl<const N: usize, T> KDTree<F, T, N> {
             };
         }
 
-        curr_bests.map(|(idx, dist)| (&self.points[idx], dist, &self.data[idx]))
+        curr_bests.map(|(idx, dist)| {
+            if idx == EMPTY {
+                (&self.points[0], F::INFINITY, &self.data[0])
+            } else {
+                (&self.points[idx], dist, &self.data[idx])
+            }
+        })
     }
 }
 
