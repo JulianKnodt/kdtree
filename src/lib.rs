@@ -188,20 +188,33 @@ impl<const N: usize, T> KDTree<F, T, N> {
         let mut s = Self {
             nodes,
             root_node_idx: 0,
-            nodes_used: 1,
+            nodes_used: size.min(1),
             points,
             data,
         };
+        if s.is_empty() {
+            return s;
+        }
         s.nodes[0].num_points = s.points.len();
         s.update_node_bounds(0);
         s.subdivide(0, split.into());
         s.nodes.truncate(s.nodes_used);
         s
     }
+    /// Iterate over the data associated with each point
+    #[inline]
+    pub fn iter_data_mut(&mut self) -> impl Iterator<Item=&mut T> {
+      self.data.iter_mut()
+    }
     /// Returns the number of points in this KD-tree
     #[inline]
     pub fn len(&self) -> usize {
         self.points.len()
+    }
+    /// Returns if there are no points in this KD-tree
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
     }
     fn update_node_bounds(&mut self, idx: usize) {
         let node = &mut self.nodes[idx];
@@ -329,9 +342,11 @@ impl<const N: usize, T> KDTree<F, T, N> {
     pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, &T) {
         self.nearest_filter(p, |_| true)
     }
+    #[inline]
     pub fn nearest_filter(&self, p: &[F; N], filter: impl Fn(&T) -> bool) -> (&[F; N], F, &T) {
         self.nearest_filter_top_k::<1>(p, F::INFINITY, filter)[0]
     }
+    /// Filter allows for skipping elements which return false.
     pub fn nearest_filter_top_k<const K: usize>(
         &self,
         p: &[F; N],
