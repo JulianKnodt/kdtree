@@ -325,6 +325,17 @@ impl<const N: usize, T> KDTree<F, T, N> {
         self.nearest_filter(p, |_| true)
     }
     pub fn nearest_filter(&self, p: &[F; N], filter: impl Fn(&T) -> bool) -> (&[F; N], F, &T) {
+        self.nearest_filter_top_k::<1>(p, filter)[0]
+    }
+    pub fn nearest_filter_top_k<const K: usize>(
+        &self,
+        p: &[F; N],
+        filter: impl Fn(&T) -> bool,
+    ) -> [(&[F; N], F, &T); K] {
+        if K == 0 {
+            // Need this for type checking
+            return [0; K].map(|idx| (&self.points[idx], 0., &self.data[idx]));
+        }
         let mut heap = vec![];
         const SZ: usize = 32;
         let mut stack = [0; SZ];
@@ -356,7 +367,7 @@ impl<const N: usize, T> KDTree<F, T, N> {
             }};
         }
 
-        let mut curr_best = (0, F::INFINITY);
+        let mut curr_bests = [(0, F::INFINITY); K];
         push!(self.root_node_idx);
         loop {
             let node = pop!();
@@ -368,10 +379,10 @@ impl<const N: usize, T> KDTree<F, T, N> {
                     }
                     let pt = unsafe { self.points.get_unchecked(i) };
                     let d = dist(&pt, p);
-                    if d < curr_best.1 {
-                        curr_best = (i, (d - 1e-9).max(0.));
+                    if d < curr_bests[K - 1].1 {
+                        curr_bests[K - 1] = (i, (d - 1e-9).max(0.));
                     }
-                    if curr_best.1 == 0. {
+                    if curr_bests[K - 1].1 == 0. {
                         break;
                     }
                 }
@@ -379,8 +390,8 @@ impl<const N: usize, T> KDTree<F, T, N> {
             }
             let c1 = unsafe { &self.nodes.get_unchecked(node.left_child()) };
             let c2 = unsafe { &self.nodes.get_unchecked(node.right_child()) };
-            let d1 = c1.bounds.overlaps(p, curr_best.1);
-            let d2 = c2.bounds.overlaps(p, curr_best.1);
+            let d1 = c1.bounds.overlaps(p, curr_bests[K - 1].1);
+            let d2 = c2.bounds.overlaps(p, curr_bests[K - 1].1);
 
             match (d1, d2) {
                 (None, None) => {}
@@ -398,15 +409,15 @@ impl<const N: usize, T> KDTree<F, T, N> {
             };
         }
 
-        let pt = &self.points[curr_best.0];
-        let dist = curr_best.1;
-        (pt, dist, &self.data[curr_best.0])
+        curr_bests.map(|(idx, dist)| (&self.points[idx], dist, &self.data[idx]))
     }
 }
 
 #[test]
 fn test_new_kdtree() {
-    let pts = (0..100000).map(|i| [(i as F).sin(), (i as F).cos()]);
+    let pts = (0..100000)
+        .map(|i| [(i as F).sin(), (i as F).cos()])
+        .map(|p| (p, ()));
     let kdt = KDTree::<F, (), 2>::new(pts, ());
     println!("{:?}", kdt.nodes_used);
 
@@ -417,7 +428,7 @@ fn test_new_kdtree() {
 #[test]
 fn test_correct() {
     for n in 1..=100 {
-        let pts = (0..n).map(|i| [(i as F).sin(), (i as F).cos()]);
+        let pts = (0..n).map(|i| ([(i as F).sin(), (i as F).cos()], ()));
         let kdt = KDTree::<F, (), 2>::new(pts, ());
         let near_to = [0.; 2];
         let found_nearest = kdt.nearest(&near_to).0;
@@ -440,12 +451,13 @@ fn test_correct() {
 fn bench_kdtree(b: &mut test::Bencher) {
     let n = 10000000;
     let pts = (0..n).map(|i| i as F).map(|i| {
-        [
+        let p = [
             i.sin(),
             (i * 0.07).cos(),
             (i * 0.3).sin(),
             (i * 0.12).cos(), /**/
-        ]
+        ];
+        (p, ())
     });
 
     use core::hint::black_box;
