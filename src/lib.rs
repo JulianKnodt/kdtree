@@ -203,8 +203,8 @@ impl<const N: usize, T> KDTree<F, T, N> {
     }
     /// Iterate over the data associated with each point
     #[inline]
-    pub fn iter_data_mut(&mut self) -> impl Iterator<Item=&mut T> {
-      self.data.iter_mut()
+    pub fn iter_data_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.data.iter_mut()
     }
     /// Returns the number of points in this KD-tree
     #[inline]
@@ -439,6 +439,25 @@ impl<const N: usize, T> KDTree<F, T, N> {
                 (&self.points[idx], dist, &self.data[idx])
             }
         })
+    }
+}
+impl<T, const N: usize> KDTree<F, T, N> {
+    pub fn save_as_ply(&self, filename: &str) -> std::io::Result<()> {
+        use std::fs::File;
+        use std::io::{BufWriter, Write};
+        let f = File::create(filename)?;
+        let mut f = BufWriter::new(f);
+        write!(f, "ply")?;
+        write!(f, "format ascii 1.0")?;
+        write!(f, "element vertex {}", self.points.len())?;
+        write!(f, "property float x")?;
+        write!(f, "property float y")?;
+        write!(f, "property float z")?;
+        write!(f, "end_header")?;
+        for &pt in &self.points {
+            write!(f, "{} {} {}", pt[0], pt[1], pt[2])?;
+        }
+        Ok(())
     }
 }
 
