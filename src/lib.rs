@@ -2,6 +2,8 @@
 #![feature(test)]
 extern crate test;
 
+use std::collections::BTreeMap;
+
 type F = f32;
 
 #[inline]
@@ -61,6 +63,12 @@ impl<const N: usize> AABB<N> {
             .unwrap()
             .0
     }
+    pub fn add_aabb(&self, o: &Self) -> Self {
+        let mut new = *self;
+        new.add_point(&o.min);
+        new.add_point(&o.max);
+        new
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -82,6 +90,12 @@ impl<const N: usize> Sphere<N> {
         debug_assert!(self.radius >= 0.);
         let sub_d = d - self.radius;
         (sub_d < rad).then_some(sub_d)
+    }
+
+    fn to_aabb(&self) -> AABB<N> {
+        let min = std::array::from_fn(|i| self.center[i] - self.radius);
+        let max = std::array::from_fn(|i| self.center[i] + self.radius);
+        AABB { min, max }
     }
 
     fn volume(&self) -> F {
@@ -137,13 +151,16 @@ impl<const N: usize> KDNode<N> {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct KDTree<T, Q, const N: usize> {
+pub struct KDTree<T, Q, const N: usize, const ALLOW_UPDATES: bool = false> {
     nodes: Vec<KDNode<N>>,
     root_node_idx: usize,
     nodes_used: usize,
 
     points: Vec<[T; N]>,
     data: Vec<Q>,
+
+    /// marks which points are no longer valid
+    invalids: BTreeMap<usize, bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +197,7 @@ impl From<()> for SplitKind {
     }
 }
 
-impl<const N: usize, T> KDTree<F, T, N> {
+impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
     pub fn new(pts: impl Iterator<Item = ([F; N], T)>, split: impl Into<SplitKind>) -> Self {
         let (points, data): (Vec<_>, Vec<_>) = pts.unzip();
         let size = 2 * points.len() + 1;
@@ -191,6 +208,7 @@ impl<const N: usize, T> KDTree<F, T, N> {
             nodes_used: size.min(1),
             points,
             data,
+            invalids: BTreeMap::new(),
         };
         if s.is_empty() {
             return s;
@@ -221,6 +239,9 @@ impl<const N: usize, T> KDTree<F, T, N> {
         let mut aabb = AABB::EMPTY;
         let fp = node.first_point();
         for p in &self.points[fp..fp + node.num_points] {
+            if AU && self.invalids.get(&i).copied().unwrap_or(false) {
+              continue;
+            }
             aabb.add_point(p);
         }
         node.bounds = aabb.to_sphere();
@@ -286,6 +307,43 @@ impl<const N: usize, T> KDTree<F, T, N> {
             .unwrap();
 
         (axis, best_pos)
+    }
+    fn refit(&mut self) {
+        // note do not need to do multiple iterations
+        // because the children are always greater than the parents in index
+        for i in (0..self.nodes.len()).rev() {
+            let n = &self.nodes[i];
+            if n.is_leaf() {
+                self.update_node_bounds(i)
+            } else {
+                let nl = self.nodes[n.left_child()].bounds.to_aabb();
+                let nr = self.nodes[n.right_child()].bounds.to_aabb();
+                self.nodes[i].bounds = nl.add_aabb(&nr).to_sphere();
+            }
+        }
+    }
+    /// Adjust points, and refits KDTree with new points.
+    /// filter returns `Some(True)` if the point was updated and should be used
+    /// or `Some(false)` if the point should be removed, and `None` if it was not updated
+    pub fn adjust_points(&mut self, mut filter: impl FnMut(&mut [F; N], &mut T) -> Option<bool>) {
+        if !AU {
+            panic!("Updates prevented at compile time");
+        }
+        let mut any_updated = false;
+        for i in 0..self.points.len() {
+            match filter(&mut self.points[i], &mut self.data[i]) {
+                Some(true) => {
+                    any_updated = true;
+                }
+                Some(false) => {
+                    self.invalids.insert(i, true);
+                }
+                None => {}
+            }
+        }
+        if any_updated {
+            self.refit();
+        }
     }
     fn subdivide(&mut self, idx: usize, split_kind: SplitKind) {
         let node = &self.nodes[idx];
@@ -396,6 +454,9 @@ impl<const N: usize, T> KDTree<F, T, N> {
             if node.is_leaf() {
                 let fp = node.first_point();
                 for i in fp..fp + node.num_points {
+                    if AU && self.invalids.get(&i).copied().unwrap_or(false) {
+                        continue;
+                    }
                     if !filter(&self.data[i]) {
                         continue;
                     }
@@ -447,15 +508,15 @@ impl<T, const N: usize> KDTree<F, T, N> {
         use std::io::{BufWriter, Write};
         let f = File::create(filename)?;
         let mut f = BufWriter::new(f);
-        write!(f, "ply")?;
-        write!(f, "format ascii 1.0")?;
-        write!(f, "element vertex {}", self.points.len())?;
-        write!(f, "property float x")?;
-        write!(f, "property float y")?;
-        write!(f, "property float z")?;
-        write!(f, "end_header")?;
+        writeln!(f, "ply")?;
+        writeln!(f, "format ascii 1.0")?;
+        writeln!(f, "element vertex {}", self.points.len())?;
+        writeln!(f, "property float x")?;
+        writeln!(f, "property float y")?;
+        writeln!(f, "property float z")?;
+        writeln!(f, "end_header")?;
         for &pt in &self.points {
-            write!(f, "{} {} {}", pt[0], pt[1], pt[2])?;
+            writeln!(f, "{} {} {}", pt[0], pt[1], pt[2])?;
         }
         Ok(())
     }
