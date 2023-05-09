@@ -436,11 +436,15 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         self.subdivide(right_child_idx, split_kind);
     }
     #[inline]
-    pub fn nearest(&self, p: &[F; N]) -> (&[F; N], F, &T) {
+    pub fn nearest(&self, p: &[F; N]) -> Option<(&[F; N], F, &T)> {
         self.nearest_filter(p, |_| true)
     }
     #[inline]
-    pub fn nearest_filter(&self, p: &[F; N], filter: impl Fn(&T) -> bool) -> (&[F; N], F, &T) {
+    pub fn nearest_filter(
+        &self,
+        p: &[F; N],
+        filter: impl Fn(&T) -> bool,
+    ) -> Option<(&[F; N], F, &T)> {
         self.nearest_filter_top_k::<1>(p, F::INFINITY, filter)[0]
     }
     /// Filter allows for skipping elements which return false.
@@ -449,10 +453,13 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         p: &[F; N],
         ball_radius: F,
         filter: impl Fn(&T) -> bool,
-    ) -> [(&[F; N], F, &T); K] {
+    ) -> [Option<(&[F; N], F, &T)>; K] {
         if K == 0 {
-            // Need this for type checking
-            return [0; K].map(|idx| (&self.points[idx], 0., &self.data[idx]));
+            // Need K for type checking
+            return [None; K];
+        }
+        if self.is_empty() {
+            return [None; K];
         }
         let mut heap = vec![];
         const SZ: usize = 32;
@@ -532,13 +539,8 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
             };
         }
 
-        curr_bests.map(|(idx, dist)| {
-            if idx == EMPTY {
-                (&self.points[0], F::INFINITY, &self.data[0])
-            } else {
-                (&self.points[idx], dist, &self.data[idx])
-            }
-        })
+        curr_bests
+            .map(|(idx, dist)| (idx != EMPTY).then(||(&self.points[idx], dist, &self.data[idx])))
     }
 }
 impl<T, const N: usize> KDTree<F, T, N> {
