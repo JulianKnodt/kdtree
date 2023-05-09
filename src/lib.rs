@@ -1,8 +1,10 @@
 #![feature(generic_arg_infer)]
 #![feature(test)]
+#![feature(drain_filter)]
+#![feature(let_chains)]
 extern crate test;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type F = f32;
 
@@ -17,7 +19,7 @@ fn dist_sq<const N: usize>(a: &[F; N], b: &[F; N]) -> F {
 }
 
 #[inline]
-fn dist<const N: usize>(a: &[F; N], b: &[F; N]) -> F {
+pub fn dist<const N: usize>(a: &[F; N], b: &[F; N]) -> F {
     dist_sq(a, b).sqrt()
 }
 
@@ -49,6 +51,20 @@ impl<const N: usize> AABB<N> {
     pub fn extent(&self) -> [F; N] {
         std::array::from_fn(|i| self.max[i] - self.min[i])
     }
+    /*
+    #[inline]
+    pub fn contains_sphere(&self, s: &Sphere<N>) -> bool {
+        for i in 0..N {
+            if s.center[i] + s.radius > self.max[i] {
+                return false;
+            }
+            if s.center[i] - s.radius < self.min[i] {
+                return false;
+            }
+        }
+        true
+    }
+    */
     #[inline]
     pub fn to_sphere(&self) -> Sphere<N> {
         Sphere {
@@ -101,6 +117,30 @@ impl<const N: usize> Sphere<N> {
     fn volume(&self) -> F {
         const PI: F = std::f64::consts::PI as F;
         4. / 3. * PI * self.radius * self.radius * self.radius
+    }
+
+    #[inline]
+    fn contains(&self, p: &[F; N]) -> bool {
+        dist(&self.center, p) < self.radius
+    }
+    #[inline]
+    fn add_point(&mut self, p: &[F; N]) {
+        self.radius = self.radius.max(dist(&self.center, p));
+    }
+    #[inline]
+    fn contains_sphere(&self, s: &Self) -> bool {
+        let c_dist = dist(&self.center, &s.center);
+        c_dist < (self.radius - s.radius).abs()
+    }
+    #[inline]
+    fn add_sphere(&mut self, s: &Self) {
+        let c_dist = dist(&self.center, &s.center);
+        self.radius += (if self.radius < s.radius {
+            self.radius - s.radius
+        } else {
+            self.radius
+        } - c_dist)
+            .max(0.);
     }
 }
 
@@ -158,9 +198,11 @@ pub struct KDTree<T, Q, const N: usize, const ALLOW_UPDATES: bool = false> {
 
     points: Vec<[T; N]>,
     data: Vec<Q>,
+    // map from data -> (node, index)
+    index: BTreeMap<Q, Vec<(usize, usize)>>,
 
     /// marks which points are no longer valid
-    invalids: BTreeMap<usize, bool>,
+    invalids: BTreeSet<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +239,13 @@ impl From<()> for SplitKind {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UpdateKind<T> {
+    Some(T),
+    Delete,
+    None,
+}
+
 impl<const N: usize, T> KDTree<F, T, N, false> {
     pub fn new(pts: impl Iterator<Item = ([F; N], T)>, split: impl Into<SplitKind>) -> Self {
         let (points, data): (Vec<_>, Vec<_>) = pts.unzip();
@@ -208,7 +257,8 @@ impl<const N: usize, T> KDTree<F, T, N, false> {
             nodes_used: size.min(1),
             points,
             data,
-            invalids: BTreeMap::new(),
+            invalids: BTreeSet::new(),
+            index: BTreeMap::new(),
         };
         if s.is_empty() {
             return s;
@@ -230,20 +280,38 @@ impl<const N: usize, T> KDTree<F, T, N, false> {
             points: self.points.clone(),
             data: self.data.clone(),
             invalids: self.invalids.clone(),
+            index: self.index.clone(),
         }
     }
 }
 impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
+    #[inline]
+    pub fn init_index(&mut self)
+    where
+        T: Ord + Copy,
+    {
+        for (ni, n) in self.nodes.iter().enumerate() {
+            if n.is_leaf() {
+                let fp = n.first_point();
+                for i in fp..fp + n.num_points {
+                    self.index.entry(self.data[i]).or_default().push((ni, i));
+                }
+            }
+        }
+    }
     /// Rebalances the tree after updates, deleting empty nodes.
-    pub fn rebalance(&mut self) {
+    pub fn rebalance(&mut self, new_points: impl Iterator<Item = ([F; N], T)>) {
         if self.is_empty() {
             return;
         }
         assert!(AU || self.invalids.is_empty());
-        while let Some((l, v)) = self.invalids.pop_last() {
-            assert!(v);
-            self.nodes.swap_remove(l);
+        while let Some(l) = self.invalids.pop_last() {
             self.points.swap_remove(l);
+            self.data.swap_remove(l);
+        }
+        for (p, d) in new_points {
+            self.points.push(p);
+            self.data.push(d);
         }
         let size = 2 * self.points.len() + 1;
         for n in &mut self.nodes {
@@ -278,7 +346,7 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         let fp = node.first_point();
         for i in fp..fp + node.num_points {
             let p = &self.points[i];
-            if AU && self.invalids.get(&i).copied().unwrap_or(false) {
+            if AU && self.invalids.contains(&i) {
                 continue;
             }
             aabb.add_point(p);
@@ -347,7 +415,7 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
 
         (axis, best_pos)
     }
-    fn refit(&mut self) {
+    pub fn refit(&mut self) {
         // note do not need to do multiple iterations
         // because the children are always greater than the parents in index
         for i in (0..self.nodes.len()).rev() {
@@ -361,27 +429,53 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
             }
         }
     }
-    /// Adjust points, and refits KDTree with new points.
-    /// filter returns `Some(True)` if the point was updated and should be used
-    /// or `Some(false)` if the point should be removed, and `None` if it was not updated
-    pub fn adjust_points(&mut self, mut filter: impl FnMut(&mut [F; N], &mut T) -> Option<bool>) {
-        if !AU {
-            panic!("Updates prevented at compile time");
-        }
-        let mut any_updated = false;
-        for i in 0..self.points.len() {
-            match filter(&mut self.points[i], &mut self.data[i]) {
-                Some(true) => {
-                    any_updated = true;
+    pub fn adjust_points_matching(
+        &mut self,
+        matching: &[T],
+        mut adj: impl FnMut([F; N], T) -> UpdateKind<([F; N], T)>,
+    ) where
+        T: Copy + Ord,
+    {
+        assert!(!self.index.is_empty());
+
+        for &m in matching {
+            let Some(mut idxs) = self.index.remove(&m) else {
+                continue;
+            };
+            let iter = idxs.drain_filter(|&mut (ni, i)| match adj(self.points[i], self.data[i]) {
+                UpdateKind::Some((p, d)) => {
+                    // TODO maybe eagerly update parents here?
+                    if !self.nodes[ni].bounds.contains(&p) {
+                        self.nodes[ni].bounds.add_point(&p);
+                        let mut parent = ni.checked_sub(2);
+                        // TODO
+                        while let Some(p) = parent &&
+                        !self.nodes[p].bounds.contains_sphere(&self.nodes[p+2].bounds) {
+                            let s = self.nodes[p+2].bounds;
+                            self.nodes[p].bounds.add_sphere(&s);
+                            parent = p.checked_sub(2);
+                        }
+                    }
+                    self.points[i] = p;
+                    self.data[i] = d;
+                    if d != m {
+                        self.index.entry(d).or_default().push((ni, i));
+                        true
+                    } else {
+                        false
+                    }
                 }
-                Some(false) => {
-                    self.invalids.insert(i, true);
+                UpdateKind::Delete => {
+                    self.invalids.insert(i);
+                    true
                 }
-                None => {}
-            }
-        }
-        if any_updated {
-            self.refit();
+                UpdateKind::None => false,
+            });
+
+            // drain iter to ensure it's actually filtered.
+            for _ in iter {}
+
+            assert_eq!(self.index.insert(m, idxs), None);
         }
     }
     fn subdivide(&mut self, idx: usize, split_kind: SplitKind) {
@@ -500,7 +594,7 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
             if node.is_leaf() {
                 let fp = node.first_point();
                 for i in fp..fp + node.num_points {
-                    if AU && self.invalids.get(&i).copied().unwrap_or(false) {
+                    if AU && self.invalids.contains(&i) {
                         continue;
                     }
                     if !filter(&self.data[i]) {
@@ -540,7 +634,7 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         }
 
         curr_bests
-            .map(|(idx, dist)| (idx != EMPTY).then(||(&self.points[idx], dist, &self.data[idx])))
+            .map(|(idx, dist)| (idx != EMPTY).then(|| (&self.points[idx], dist, &self.data[idx])))
     }
 }
 impl<T, const N: usize> KDTree<F, T, N> {
