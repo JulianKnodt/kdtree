@@ -219,6 +219,23 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         s.nodes.truncate(s.nodes_used);
         s
     }
+    pub fn rebalance(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+
+        let size = 2 * self.points.len() + 1;
+        for n in &mut self.nodes {
+            *n = KDNode::EMPTY;
+        }
+        self.nodes.resize(size, KDNode::EMPTY);
+
+        self.nodes_used = 1;
+        self.nodes[0].num_points = self.points.len();
+        self.update_node_bounds(0);
+        self.subdivide(0, ().into());
+        self.nodes.truncate(self.nodes_used);
+    }
     /// Iterate over the data associated with each point
     #[inline]
     pub fn iter_data_mut(&mut self) -> impl Iterator<Item = &mut T> {
@@ -238,9 +255,10 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         let node = &mut self.nodes[idx];
         let mut aabb = AABB::EMPTY;
         let fp = node.first_point();
-        for p in &self.points[fp..fp + node.num_points] {
+        for i in fp..fp + node.num_points {
+            let p = &self.points[i];
             if AU && self.invalids.get(&i).copied().unwrap_or(false) {
-              continue;
+                continue;
             }
             aabb.add_point(p);
         }
@@ -461,7 +479,7 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
                         continue;
                     }
                     let pt = unsafe { self.points.get_unchecked(i) };
-                    let d = dist(&pt, p);
+                    let d = dist(pt, p);
                     if d < curr_bests[K - 1].1 {
                         curr_bests[K - 1] = (i, (d - 1e-9).max(0.));
                         curr_bests.sort_by(|a, b| a.1.total_cmp(&b.1));
