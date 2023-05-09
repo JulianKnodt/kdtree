@@ -197,7 +197,7 @@ impl From<()> for SplitKind {
     }
 }
 
-impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
+impl<const N: usize, T> KDTree<F, T, N, false> {
     pub fn new(pts: impl Iterator<Item = ([F; N], T)>, split: impl Into<SplitKind>) -> Self {
         let (points, data): (Vec<_>, Vec<_>) = pts.unzip();
         let size = 2 * points.len() + 1;
@@ -219,6 +219,21 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         s.nodes.truncate(s.nodes_used);
         s
     }
+    pub fn updateable(&self) -> KDTree<F, T, N, true>
+    where
+        T: Clone,
+    {
+        KDTree {
+            nodes: self.nodes.clone(),
+            root_node_idx: 0,
+            nodes_used: self.nodes_used,
+            points: self.points.clone(),
+            data: self.data.clone(),
+            invalids: self.invalids.clone(),
+        }
+    }
+}
+impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
     /// Rebalances the tree after updates, deleting empty nodes.
     pub fn rebalance(&mut self) {
         if self.is_empty() {
