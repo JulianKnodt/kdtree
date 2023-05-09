@@ -219,11 +219,17 @@ impl<const N: usize, T, const AU: bool> KDTree<F, T, N, AU> {
         s.nodes.truncate(s.nodes_used);
         s
     }
+    /// Rebalances the tree after updates, deleting empty nodes.
     pub fn rebalance(&mut self) {
         if self.is_empty() {
             return;
         }
-
+        assert!(AU || self.invalids.is_empty());
+        while let Some((l, v)) = self.invalids.pop_last() {
+            assert!(v);
+            self.nodes.swap_remove(l);
+            self.points.swap_remove(l);
+        }
         let size = 2 * self.points.len() + 1;
         for n in &mut self.nodes {
             *n = KDNode::EMPTY;
