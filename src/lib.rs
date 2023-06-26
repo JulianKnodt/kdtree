@@ -1,6 +1,6 @@
 #![feature(generic_arg_infer)]
 #![feature(test)]
-#![feature(drain_filter)]
+#![feature(extract_if)]
 #![feature(let_chains)]
 extern crate test;
 
@@ -441,7 +441,7 @@ macro_rules! impl_kdtree {
                         continue;
                     };
                     let iter =
-                        idxs.drain_filter(|&mut (ni, i)| match adj(self.points[i], self.data[i]) {
+                        idxs.extract_if(|&mut (ni, i)| match adj(self.points[i], self.data[i]) {
                             UpdateKind::Some((p, d)) => {
                                 // TODO maybe eagerly update parents here?
                                 if !self.nodes[ni].bounds.contains(&p) {
