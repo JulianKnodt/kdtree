@@ -241,6 +241,12 @@ pub enum UpdateKind<T> {
     None,
 }
 
+impl<Q, F, const N: usize, const UP: bool> KDTree<Q, N, UP, F> {
+    pub fn points(&self) -> &[[F; N]] {
+        &self.points
+    }
+}
+
 macro_rules! impl_kdtree {
     ($F: ty) => {
         impl<const N: usize, T> KDTree<T, N, false, $F> {
