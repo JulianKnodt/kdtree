@@ -2,13 +2,17 @@
 #![feature(test)]
 #![feature(extract_if)]
 #![feature(let_chains)]
-extern crate test;
+
+#[cfg(feature = "usize_idx")]
+pub type IdxTy = usize;
+#[cfg(not(feature = "usize_idx"))]
+pub type IdxTy = u32;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Dist<F>(std::marker::PhantomData<F>);
 
-macro_rules! Dist_impl {
+macro_rules! dist_impl {
     ($F: ty) => {
         impl Dist<$F> {
             fn dist_sq<const N: usize>(a: &[$F; N], b: &[$F; N]) -> $F {
@@ -27,8 +31,8 @@ macro_rules! Dist_impl {
     };
 }
 
-Dist_impl!(f32);
-Dist_impl!(f64);
+dist_impl!(f32);
+dist_impl!(f64);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AABB<F, const N: usize> {
@@ -61,7 +65,7 @@ macro_rules! impl_aabb {
                 std::array::from_fn(|i| self.max[i] - self.min[i])
             }
             #[inline]
-            pub fn to_sphere(&self) -> Sphere<$F, N> {
+            pub fn sphere(&self) -> Sphere<$F, N> {
                 Sphere {
                     center: self.center(),
                     radius: self.extent_length() / 2.,
@@ -70,7 +74,7 @@ macro_rules! impl_aabb {
             pub fn largest_dimension(&self) -> usize {
                 (0..N)
                     .map(|i| (i, self.max[i] - self.min[i]))
-                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                     .unwrap()
                     .0
             }
@@ -110,7 +114,7 @@ macro_rules! impl_sphere {
                 (sub_d < rad).then_some(sub_d)
             }
 
-            fn to_aabb(&self) -> AABB<$F, N> {
+            fn aabb(&self) -> AABB<$F, N> {
                 let min = std::array::from_fn(|i| self.center[i] - self.radius);
                 let max = std::array::from_fn(|i| self.center[i] + self.radius);
                 AABB { min, max }
@@ -154,8 +158,8 @@ impl_sphere!(f64);
 struct KDNode<F, const N: usize> {
     bounds: Sphere<F, N>,
 
-    left_child_or_first_point: usize,
-    num_points: usize,
+    left_child_or_first_point: IdxTy,
+    num_points: IdxTy,
 }
 impl<const N: usize> KDNode<f32, N> {
     const EMPTY: Self = KDNode {
@@ -182,24 +186,24 @@ impl<F, const N: usize> KDNode<F, N> {
     #[inline]
     fn left_child(&self) -> usize {
         debug_assert!(!self.is_leaf());
-        self.left_child_or_first_point
+        self.left_child_or_first_point as usize
     }
 
     fn is_leaf(&self) -> bool {
         self.num_points > 0
     }
 
-    fn set_left_child(&mut self, left_child: usize) -> (usize, usize) {
+    fn set_left_child(&mut self, left_child: IdxTy) -> (usize, usize) {
         assert!(self.is_leaf());
         let old_first_pt = std::mem::replace(&mut self.left_child_or_first_point, left_child);
         let num_prims = std::mem::take(&mut self.num_points);
-        (old_first_pt, num_prims)
+        (old_first_pt as usize, num_prims as usize)
     }
     fn first_point(&self) -> usize {
         assert!(self.is_leaf());
-        self.left_child_or_first_point
+        self.left_child_or_first_point as usize
     }
-    fn set_points(&mut self, first_pt: usize, num_pts: usize) {
+    fn set_points(&mut self, first_pt: IdxTy, num_pts: IdxTy) {
         self.left_child_or_first_point = first_pt;
         self.num_points = num_pts;
     }
@@ -208,32 +212,26 @@ impl<F, const N: usize> KDNode<F, N> {
 #[derive(Debug, Clone, Default)]
 pub struct KDTree<Q, const N: usize, const ALLOW_UPDATES: bool = false, F = f32> {
     nodes: Vec<KDNode<F, N>>,
-    root_node_idx: usize,
-    nodes_used: usize,
+    root_node_idx: IdxTy,
+    nodes_used: IdxTy,
 
     points: Vec<[F; N]>,
     data: Vec<Q>,
     // map from data -> (node, index)
-    index: BTreeMap<Q, Vec<(usize, usize)>>,
+    index: BTreeMap<Q, Vec<(IdxTy, IdxTy)>>,
 
     /// marks which points are no longer valid
-    invalids: BTreeSet<usize>,
+    invalids: BTreeSet<IdxTy>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitKind {
     /// Split along the middle of each sphere
+    #[default]
     Midpoint,
 
     MinMaxVolumeLin(usize),
     // TODO add SAH and other volume heuristic
-}
-
-impl From<()> for SplitKind {
-    fn from((): ()) -> SplitKind {
-        SplitKind::Midpoint
-        //SplitKind::MinMaxVolumeLin(64)
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -246,17 +244,14 @@ pub enum UpdateKind<T> {
 macro_rules! impl_kdtree {
     ($F: ty) => {
         impl<const N: usize, T> KDTree<T, N, false, $F> {
-            pub fn new(
-                pts: impl Iterator<Item = ([$F; N], T)>,
-                split: impl Into<SplitKind>,
-            ) -> Self {
+            pub fn new(pts: impl Iterator<Item = ([$F; N], T)>, split: SplitKind) -> Self {
                 let (points, data): (Vec<_>, Vec<_>) = pts.unzip();
                 let size = 2 * points.len() + 1;
                 let nodes = vec![KDNode::<$F, N>::EMPTY; size];
                 let mut s = Self {
                     nodes,
                     root_node_idx: 0,
-                    nodes_used: size.min(1),
+                    nodes_used: size.min(1) as IdxTy,
                     points,
                     data,
                     invalids: BTreeSet::new(),
@@ -265,10 +260,10 @@ macro_rules! impl_kdtree {
                 if s.is_empty() {
                     return s;
                 }
-                s.nodes[0].num_points = s.points.len();
+                s.nodes[0].num_points = s.points.len() as IdxTy;
                 s.update_node_bounds(0);
-                s.subdivide(0, split.into());
-                s.nodes.truncate(s.nodes_used);
+                s.subdivide(0, split);
+                s.nodes.truncate(s.nodes_used as usize);
                 s
             }
             pub fn updateable(&self) -> KDTree<T, N, true, $F>
@@ -294,10 +289,14 @@ macro_rules! impl_kdtree {
                 T: Ord + Copy,
             {
                 for (ni, n) in self.nodes.iter().enumerate() {
+                    let ni = ni as IdxTy;
                     if n.is_leaf() {
-                        let fp = n.first_point();
+                        let fp = n.first_point() as IdxTy;
                         for i in fp..fp + n.num_points {
-                            self.index.entry(self.data[i]).or_default().push((ni, i));
+                            self.index
+                                .entry(self.data[i as usize])
+                                .or_default()
+                                .push((ni, i));
                         }
                     }
                 }
@@ -312,6 +311,7 @@ macro_rules! impl_kdtree {
                 }
                 assert!(AU || self.invalids.is_empty());
                 while let Some(l) = self.invalids.pop_last() {
+                    let l = l as usize;
                     self.points.swap_remove(l);
                     self.data.swap_remove(l);
                 }
@@ -329,10 +329,10 @@ macro_rules! impl_kdtree {
                 self.nodes.resize(size, KDNode::<$F, N>::EMPTY);
 
                 self.nodes_used = 1;
-                self.nodes[0].num_points = self.points.len();
+                self.nodes[0].num_points = self.points.len() as IdxTy;
                 self.update_node_bounds(0);
-                self.subdivide(0, ().into());
-                self.nodes.truncate(self.nodes_used);
+                self.subdivide(0, Default::default());
+                self.nodes.truncate(self.nodes_used as usize);
                 if !self.index.is_empty() {
                     self.index = BTreeMap::new();
                     self.init_index();
@@ -357,19 +357,19 @@ macro_rules! impl_kdtree {
                 let node = &mut self.nodes[idx];
                 let mut aabb = AABB::<$F, N>::EMPTY;
                 let fp = node.first_point();
-                for i in fp..fp + node.num_points {
+                for i in fp..fp + node.num_points as usize {
                     let p = &self.points[i];
-                    if AU && self.invalids.contains(&i) {
+                    if AU && self.invalids.contains(&(i as IdxTy)) {
                         continue;
                     }
                     aabb.add_point(p);
                 }
-                node.bounds = aabb.to_sphere();
+                node.bounds = aabb.sphere();
             }
             fn midpoint_split(&self, node: &KDNode<$F, N>) -> (usize, $F) {
                 let mut aabb = AABB::<$F, N>::EMPTY;
                 let fp = node.first_point();
-                for p in &self.points[fp..fp + node.num_points] {
+                for p in &self.points[fp..fp + node.num_points as usize] {
                     aabb.add_point(p);
                 }
                 let axis = aabb.largest_dimension();
@@ -379,7 +379,7 @@ macro_rules! impl_kdtree {
                 assert!(bins > 0);
                 let mut aabb = AABB::<$F, N>::EMPTY;
                 let fp = node.first_point();
-                for p in &self.points[fp..fp + node.num_points] {
+                for p in &self.points[fp..fp + node.num_points as usize] {
                     aabb.add_point(p);
                 }
                 let (axis, best_pos, _) = (0..N)
@@ -391,7 +391,7 @@ macro_rules! impl_kdtree {
                                 let mut left_aabb = AABB::<$F, N>::EMPTY;
                                 let mut right_aabb = AABB::<$F, N>::EMPTY;
                                 let fp = node.first_point();
-                                for p in &self.points[fp..fp + node.num_points] {
+                                for p in &self.points[fp..fp + node.num_points as usize] {
                                     if p[axis] < split_pt {
                                         left_aabb.add_point(p);
                                     } else {
@@ -399,9 +399,9 @@ macro_rules! impl_kdtree {
                                     }
                                 }
                                 let vol = left_aabb
-                                    .to_sphere()
+                                    .sphere()
                                     .volume()
-                                    .max(right_aabb.to_sphere().volume());
+                                    .max(right_aabb.sphere().volume());
                                 (split_pt, vol)
                             })
                             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -421,9 +421,9 @@ macro_rules! impl_kdtree {
                     if n.is_leaf() {
                         self.update_node_bounds(i)
                     } else {
-                        let nl = self.nodes[n.left_child()].bounds.to_aabb();
-                        let nr = self.nodes[n.right_child()].bounds.to_aabb();
-                        self.nodes[i].bounds = nl.add_aabb(&nr).to_sphere();
+                        let nl = self.nodes[n.left_child()].bounds.aabb();
+                        let nr = self.nodes[n.right_child()].bounds.aabb();
+                        self.nodes[i].bounds = nl.add_aabb(&nr).sphere();
                     }
                 }
             }
@@ -440,37 +440,46 @@ macro_rules! impl_kdtree {
                     let Some(mut idxs) = self.index.remove(&m) else {
                         continue;
                     };
-                    let iter =
-                        idxs.extract_if(|&mut (ni, i)| match adj(self.points[i], self.data[i]) {
+                    let iter = idxs.extract_if(.., |&mut (ni, i)| {
+                        let i = i as usize;
+                        let ni = ni as usize;
+                        match adj(self.points[i], self.data[i]) {
                             UpdateKind::Some((p, d)) => {
                                 // TODO maybe eagerly update parents here?
                                 if !self.nodes[ni].bounds.contains(&p) {
                                     self.nodes[ni].bounds.add_point(&p);
                                     let mut parent = ni.checked_sub(2);
                                     // TODO
-                                    while let Some(p) = parent &&
-                                !self.nodes[p].bounds.contains_sphere(&self.nodes[p+2].bounds) {
-                                    let s = self.nodes[p+2].bounds;
-                                    self.nodes[p].bounds.add_sphere(&s);
-                                    parent = p.checked_sub(2);
+                                    while let Some(p) = parent
+                                        && !self.nodes[p]
+                                            .bounds
+                                            .contains_sphere(&self.nodes[p + 2].bounds)
+                                    {
+                                        let s = self.nodes[p + 2].bounds;
+                                        self.nodes[p].bounds.add_sphere(&s);
+                                        parent = p.checked_sub(2);
+                                    }
                                 }
-                                }
-                                assert!(!self.invalids.contains(&i));
+                                assert!(!self.invalids.contains(&(i as IdxTy)));
                                 self.points[i] = p;
                                 self.data[i] = d;
                                 if d != m {
-                                    self.index.entry(d).or_default().push((ni, i));
+                                    self.index
+                                        .entry(d)
+                                        .or_default()
+                                        .push((ni as IdxTy, i as IdxTy));
                                     true
                                 } else {
                                     false
                                 }
                             }
                             UpdateKind::Delete => {
-                                self.invalids.insert(i);
+                                self.invalids.insert(i as IdxTy);
                                 true
                             }
                             UpdateKind::None => false,
-                        });
+                        }
+                    });
 
                     // drain iter to ensure it's actually filtered.
                     for _ in iter {}
@@ -496,8 +505,8 @@ macro_rules! impl_kdtree {
                 }
                 */
 
-                let mut i = node.first_point();
-                let mut j = i + node.num_points - 1;
+                let mut i = node.first_point() as usize;
+                let mut j = (i + node.num_points as usize - 1) as usize;
                 while i < j {
                     if self.points[i][axis] < split_val {
                         i += 1;
@@ -508,19 +517,19 @@ macro_rules! impl_kdtree {
                     }
                 }
 
-                let left_count = i - node.first_point();
-                if left_count == 0 || left_count == node.num_points {
+                let left_count = i - node.first_point() as usize;
+                if left_count == 0 || left_count == node.num_points as usize {
                     return;
                 }
 
                 let node = &mut self.nodes[idx];
                 let (old_fst_pt, num_pts) = node.set_left_child(self.nodes_used);
                 self.nodes_used += 2;
-                let left_child_idx = node.left_child();
-                let right_child_idx = node.right_child();
+                let left_child_idx = node.left_child() as usize;
+                let right_child_idx = node.right_child() as usize;
 
-                self.nodes[left_child_idx].set_points(old_fst_pt, left_count);
-                self.nodes[right_child_idx].set_points(i, num_pts - left_count);
+                self.nodes[left_child_idx].set_points(old_fst_pt as IdxTy, left_count as IdxTy);
+                self.nodes[right_child_idx].set_points(i as IdxTy, (num_pts - left_count) as IdxTy);
 
                 self.update_node_bounds(left_child_idx);
                 self.update_node_bounds(right_child_idx);
@@ -581,7 +590,7 @@ macro_rules! impl_kdtree {
                             stack_ptr -= 1;
                             unsafe { *stack.get_unchecked(stack_ptr) }
                         };
-                        unsafe { self.nodes.get_unchecked(n) }
+                        unsafe { self.nodes.get_unchecked(n as usize) }
                     }};
                 }
                 const EMPTY: usize = usize::MAX;
@@ -592,8 +601,9 @@ macro_rules! impl_kdtree {
                     let node = pop!();
                     if node.is_leaf() {
                         let fp = node.first_point();
-                        for i in fp..fp + node.num_points {
-                            if AU && self.invalids.contains(&i) {
+                        for i in fp..fp + node.num_points as usize {
+                            let i = i as usize;
+                            if AU && self.invalids.contains(&(i as IdxTy)) {
                                 continue;
                             }
                             if !filter(&self.data[i]) {
@@ -611,22 +621,22 @@ macro_rules! impl_kdtree {
                         }
                         continue;
                     }
-                    let c1 = unsafe { &self.nodes.get_unchecked(node.left_child()) };
-                    let c2 = unsafe { &self.nodes.get_unchecked(node.right_child()) };
+                    let c1 = unsafe { &self.nodes.get_unchecked(node.left_child() as usize) };
+                    let c2 = unsafe { &self.nodes.get_unchecked(node.right_child() as usize) };
                     let d1 = c1.bounds.overlaps(p, curr_bests[K - 1].1);
                     let d2 = c2.bounds.overlaps(p, curr_bests[K - 1].1);
 
                     match (d1, d2) {
                         (None, None) => {}
-                        (None, Some(_)) => push!(node.right_child()),
-                        (Some(_), None) => push!(node.left_child()),
+                        (None, Some(_)) => push!(node.right_child() as IdxTy),
+                        (Some(_), None) => push!(node.left_child() as IdxTy),
                         (Some(d1), Some(d2)) => {
                             if d1 < d2 {
-                                push!(node.right_child());
-                                push!(node.left_child());
+                                push!(node.right_child() as IdxTy);
+                                push!(node.left_child() as IdxTy);
                             } else {
-                                push!(node.left_child());
-                                push!(node.right_child());
+                                push!(node.left_child() as IdxTy);
+                                push!(node.right_child() as IdxTy);
                             }
                         }
                     };
@@ -672,7 +682,7 @@ fn test_new_kdtree() {
     let pts = (0..100000)
         .map(|i| [(i as f32).sin(), (i as f32).cos()])
         .map(|p| (p, ()));
-    let kdt = KDTree::<(), 2>::new(pts, ());
+    let kdt = KDTree::<(), 2>::new(pts, Default::default());
     println!("{:?}", kdt.nodes_used);
 
     let f = kdt.nearest(&[0.1; 2]);
@@ -681,13 +691,18 @@ fn test_new_kdtree() {
 
 #[test]
 fn test_correct() {
-    for n in 1..=100 {
-        let pts = (0..n).map(|i| ([(i as f32).sin(), (i as f32).cos()], ()));
-        let kdt = KDTree::<(), 2>::new(pts, ());
+    for n in 1..=5000 {
+        let pts = (0..n).map(|i| {
+            [
+                (i as f32 * 131.94 + 4.2451 * n as f32).sin(),
+                (i as f32 * 239.73 + 3.18 * n as f32).cos(),
+            ]
+        });
+        let kd_vals = pts.clone().map(|v| (v, ()));
+        let kdt = KDTree::<(), 2>::new(kd_vals, Default::default());
         let near_to = [0.; 2];
         let found_nearest = kdt.nearest(&near_to).unwrap().0;
 
-        let pts = (0..n).map(|i| [(i as f32).sin(), (i as f32).cos()]);
         let naive_nearest = pts
             .map(|p| (p, Dist::<f32>::dist(&near_to, &p)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -696,10 +711,13 @@ fn test_correct() {
         if naive_nearest != *found_nearest {
             let d0 = Dist::<f32>::dist(&near_to, &naive_nearest);
             let d1 = Dist::<f32>::dist(&near_to, &found_nearest);
-            assert!((d0 - d1).abs() < 1e-5);
+            assert_eq!(d0, d1);
         }
     }
 }
+
+#[cfg(test)]
+extern crate test;
 
 #[bench]
 fn bench_kdtree(b: &mut test::Bencher) {
@@ -715,7 +733,7 @@ fn bench_kdtree(b: &mut test::Bencher) {
     });
 
     use core::hint::black_box;
-    let kdt = KDTree::<(), _>::new(pts, ());
+    let kdt = KDTree::<(), _>::new(pts, Default::default());
     let mut i = 0;
     b.iter(|| {
         i += 1;
