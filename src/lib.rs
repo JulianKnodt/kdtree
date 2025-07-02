@@ -16,12 +16,7 @@ macro_rules! dist_impl {
     ($F: ty) => {
         impl Dist<$F> {
             fn dist_sq<const N: usize>(a: &[$F; N], b: &[$F; N]) -> $F {
-                let mut d = 0.;
-                for i in 0..N {
-                    let v = a[i] - b[i];
-                    d += v * v;
-                }
-                d
+                (0..N).map(|i| a[i] - b[i]).map(|v| v * v).sum::<$F>()
             }
             #[inline]
             pub fn dist<const N: usize>(a: &[$F; N], b: &[$F; N]) -> $F {
@@ -104,14 +99,15 @@ macro_rules! impl_sphere {
                 center: [0.; N],
                 radius: <$F>::INFINITY,
             };
-            // If it overlaps, returns the distance to the sphere
+            /// If this sphere and another sphere defined by a point and radius overlap, returns
+            /// their distance.
             #[inline]
             fn overlaps(&self, pt: &[$F; N], rad: $F) -> Option<$F> {
-                let d = Dist::<$F>::dist(&self.center, pt);
+                let total_d = Dist::<$F>::dist(&self.center, pt);
                 debug_assert!(rad >= 0.);
                 debug_assert!(self.radius >= 0.);
-                let sub_d = d - self.radius;
-                (sub_d < rad).then_some(sub_d)
+                let sub_d = total_d - self.radius;
+                (sub_d <= rad).then_some(sub_d)
             }
 
             fn aabb(&self) -> AABB<$F, N> {
@@ -543,6 +539,8 @@ macro_rules! impl_kdtree {
                 self.subdivide(left_child_idx, split_kind);
                 self.subdivide(right_child_idx, split_kind);
             }
+            /// Returns the nearest point, dist to point, and the associated data with the
+            /// point.
             #[inline]
             pub fn nearest(&self, p: &[$F; N]) -> Option<(&[$F; N], $F, &T)> {
                 self.nearest_filter(p, |_| true)
@@ -618,7 +616,7 @@ macro_rules! impl_kdtree {
                             let pt = unsafe { self.points.get_unchecked(i) };
                             let d = Dist::<$F>::dist(pt, p);
                             if d < curr_bests[K - 1].1 {
-                                curr_bests[K - 1] = (i, (d - 1e-9).max(0.));
+                                curr_bests[K - 1] = (i, d);
                                 curr_bests.sort_by(|a, b| a.1.total_cmp(&b.1));
                             }
                             if curr_bests[K - 1].1 == 0. {
@@ -697,6 +695,7 @@ fn test_new_kdtree() {
 
 #[test]
 fn test_correct() {
+    let probes = [[0.; 2], [0., 1.], [-0.5, -0.5], [1., -0.5]];
     for n in 1..=5000 {
         let pts = (0..n).map(|i| {
             [
@@ -706,18 +705,55 @@ fn test_correct() {
         });
         let kd_vals = pts.clone().map(|v| (v, ()));
         let kdt = KDTree::<(), 2>::new(kd_vals, Default::default());
-        let near_to = [0.; 2];
-        let found_nearest = kdt.nearest(&near_to).unwrap().0;
+        for probe in probes {
+            let (found_nearest, d, _) = kdt.nearest(&probe).unwrap();
+            let naive_nearest = pts
+                .clone()
+                .map(|p| (p, Dist::<f32>::dist(&probe, &p)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap()
+                .0;
+            assert!((Dist::<f32>::dist(&probe, found_nearest) - d).abs() < 1e-8);
+            if naive_nearest != *found_nearest {
+                let d0 = Dist::<f32>::dist(&probe, &naive_nearest);
+                let d1 = Dist::<f32>::dist(&probe, &found_nearest);
+                assert_eq!(d0, d1);
+            }
+        }
+    }
+}
 
-        let naive_nearest = pts
-            .map(|p| (p, Dist::<f32>::dist(&near_to, &p)))
+#[test]
+fn test_dense_3d() {
+    let pts = (0..50000)
+        .map(|i| {
+            [
+                (i as f32 * 131.94 + 4.2451).sin(),
+                (i as f32 * 239.73 + 3.18).cos(),
+                (i as f32 * 83.38 + 19.32).sin(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let kd_vals = pts.iter().map(|&v| (v, ()));
+
+    let kdt = KDTree::<(), 3>::new(kd_vals, Default::default());
+
+    let probes = (0..500).map(|i| {
+        [
+            (i as f32 * 1.1239 + 4.2451).sin(),
+            (i as f32 * 2.438 + 3.18).cos(),
+            (i as f32 * 8.239 + 19.32).sin(),
+        ]
+    });
+    for p in probes {
+        let found_nearest = kdt.nearest(&p).unwrap().0;
+        let (naive_nearest, naive_dist) = pts
+            .iter()
+            .map(|pt| (pt, Dist::<f32>::dist(&p, &pt)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .unwrap()
-            .0;
-        if naive_nearest != *found_nearest {
-            let d0 = Dist::<f32>::dist(&near_to, &naive_nearest);
-            let d1 = Dist::<f32>::dist(&near_to, &found_nearest);
-            assert_eq!(d0, d1);
+            .unwrap();
+        if naive_nearest != found_nearest {
+            assert_eq!(naive_dist, Dist::<f32>::dist(&found_nearest, &p));
         }
     }
 }
