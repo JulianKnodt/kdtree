@@ -2,13 +2,12 @@
 #![feature(test)]
 #![feature(extract_if)]
 #![feature(let_chains)]
+#![feature(trait_alias)]
 
 #[cfg(feature = "usize_idx")]
 pub type IdxTy = usize;
 #[cfg(not(feature = "usize_idx"))]
 pub type IdxTy = u32;
-
-use std::collections::{BTreeMap, BTreeSet};
 
 struct Dist<F>(std::marker::PhantomData<F>);
 
@@ -28,6 +27,123 @@ macro_rules! dist_impl {
 
 dist_impl!(f32);
 dist_impl!(f64);
+
+struct SimplexDist<F, const S: usize>(std::marker::PhantomData<F>);
+
+macro_rules! simplex_dist_impl {
+    ($F: ty, $math: ident) => {
+        impl<const S: usize> SimplexDist<$F, S> {
+            fn dist_sq<const N: usize>(a: &[[$F; N]; S], b: &[$F; N]) -> $F {
+                match a.as_slice() {
+                    [] => 0.,
+                    [pt] => Dist::<$F>::dist_sq(&pt, b),
+                    // TODO edge?
+
+                    // tri
+                    [t0, t1, t2] => {
+                        use std::array::from_fn;
+                        if N == 3 {
+                            $math::tri_sdf_3d(
+                                &[t0, t1, t2].map(|v| from_fn(|i| v[i])),
+                                from_fn(|i| b[i]),
+                            )
+                        } else if N == 2 {
+                            $math::tri_sdf_2d(
+                                &[t0, t1, t2].map(|v| from_fn(|i| v[i])),
+                                from_fn(|i| b[i]),
+                            )
+                        } else {
+                            todo!("not sure how to implement this for N != 2 or N != 3");
+                        }
+                    }
+                    _ => todo!(),
+                }
+            }
+            #[inline]
+            pub fn dist<const N: usize>(a: &[[$F; N]; S], b: &[$F; N]) -> $F {
+                Self::dist_sq(a, b).sqrt()
+            }
+        }
+
+        mod $math {
+            fn sign(x: $F) -> $F {
+                if x == 0. {
+                    0.
+                } else {
+                    x.signum()
+                }
+            }
+
+            fn dot<const N: usize>(a: [$F; N], b: [$F; N]) -> $F {
+                (0..N).map(|i| a[i] * b[i]).sum::<$F>()
+            }
+
+            fn dot2<const N: usize>(x: [$F; N]) -> $F {
+                dot(x, x)
+            }
+
+            fn kmul<const N: usize>(k: $F, v: [$F; N]) -> [$F; N] {
+                v.map(|v| v * k)
+            }
+
+            fn sub<const N: usize>(a: [$F; N], b: [$F; N]) -> [$F; N] {
+                std::array::from_fn(|i| a[i] - b[i])
+            }
+
+            fn cross([x, y, z]: [$F; 3], [a, b, c]: [$F; 3]) -> [$F; 3] {
+                [y * c - z * b, z * a - x * c, x * b - y * a]
+            }
+
+            fn cross_2d([x, y]: [$F; 2], [a, b]: [$F; 2]) -> $F {
+                x * b - y * a
+            }
+            pub fn tri_sdf_2d(&[p0, p1, p2]: &[[$F; 2]; 3], p: [$F; 2]) -> $F {
+                let e0 = sub(p1, p0);
+                let e1 = sub(p2, p1);
+                let e2 = sub(p0, p2);
+                let v0 = sub(p, p0);
+                let v1 = sub(p, p1);
+                let v2 = sub(p, p2);
+                let [pq0, pq1, pq2] = [[v0, e0], [v1, e1], [v2, e2]]
+                    .map(|[v, e]| sub(v, kmul((dot(v, e) / dot2(e)).clamp(0., 1.), e)));
+                let s = sign(cross_2d(e0, e2));
+                let dx = dot2(pq0).min(dot2(pq1)).min(dot2(pq2));
+                let dy = (s * cross_2d(v0, e0))
+                    .min(s * cross_2d(v1, e1))
+                    .min(s * cross_2d(v2, e2));
+                -dx.sqrt() * sign(dy)
+            }
+
+            pub fn tri_sdf_3d(&[a, b, c]: &[[$F; 3]; 3], p: [$F; 3]) -> $F {
+                let ba = sub(b, a);
+                let pa = sub(p, a);
+                let cb = sub(c, b);
+                let pb = sub(p, b);
+                let ac = sub(a, c);
+                let pc = sub(p, c);
+                let nor = cross(ba, ac);
+
+                let cond = sign(dot(cross(ba, nor), pa))
+                    + sign(dot(cross(cb, nor), pb))
+                    + sign(dot(cross(ac, nor), pc))
+                    < 2.0;
+                let v = if cond {
+                    let [a, b, c] = [[ba, pa], [cb, pb], [ac, pc]].map(|[e, p]| {
+                        let v = kmul((dot(e, p) / dot2(e)).clamp(0., 1.), e);
+                        dot2(sub(v, p))
+                    });
+                    a.min(b).min(c)
+                } else {
+                    dot(nor, pa) * dot(nor, pa) / dot2(nor)
+                };
+                v.sqrt()
+            }
+        }
+    };
+}
+
+simplex_dist_impl!(f32, math_f32);
+simplex_dist_impl!(f64, math_f64);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AABB<F, const N: usize> {
@@ -121,6 +237,7 @@ macro_rules! impl_sphere {
                 4. / 3. * PI * self.radius * self.radius * self.radius
             }
 
+            /*
             #[inline]
             fn contains(&self, p: &[$F; N]) -> bool {
                 Dist::<$F>::dist(&self.center, p) < self.radius
@@ -144,6 +261,7 @@ macro_rules! impl_sphere {
                 } - c_dist)
                     .max(0.);
             }
+            */
         }
     };
 }
@@ -206,18 +324,13 @@ impl<F, const N: usize> KDNode<F, N> {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct KDTree<Q, const N: usize, const ALLOW_UPDATES: bool = false, F = f32> {
+pub struct KDTree<Q, const N: usize, const S: usize = 1, F = f32> {
     nodes: Vec<KDNode<F, N>>,
     root_node_idx: IdxTy,
     nodes_used: IdxTy,
 
-    points: Vec<[F; N]>,
+    elems: Vec<[[F; N]; S]>,
     data: Vec<Q>,
-    // map from data -> (node, index)
-    index: BTreeMap<Q, Vec<(IdxTy, IdxTy)>>,
-
-    /// marks which points are no longer valid
-    invalids: BTreeSet<IdxTy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -237,109 +350,47 @@ pub enum UpdateKind<T> {
     None,
 }
 
-impl<Q, F, const N: usize, const UP: bool> KDTree<Q, N, UP, F> {
+impl<Q, F, const N: usize> KDTree<Q, N, 1, F> {
     pub fn points(&self) -> &[[F; N]] {
-        &self.points
+        unsafe { std::mem::transmute(self.elems.as_slice()) }
     }
 }
 
 macro_rules! impl_kdtree {
     ($F: ty) => {
-        impl<const N: usize, T> KDTree<T, N, false, $F> {
-            pub fn new(pts: impl Iterator<Item = ([$F; N], T)>, split: SplitKind) -> Self {
-                let (points, data): (Vec<_>, Vec<_>) = pts.unzip();
-                let size = 2 * points.len() + 1;
+        impl<const N: usize, const S: usize, T> KDTree<T, N, S, $F> {
+            pub fn new(pts: impl Iterator<Item = ([[$F; N]; S], T)>, split: SplitKind) -> Self {
+                let (elems, data): (Vec<_>, Vec<_>) = pts.unzip();
+                let size = 2 * elems.len() + 1;
                 let nodes = vec![KDNode::<$F, N>::EMPTY; size];
                 let mut s = Self {
                     nodes,
                     root_node_idx: 0,
                     nodes_used: size.min(1) as IdxTy,
-                    points,
+                    elems,
                     data,
-                    invalids: BTreeSet::new(),
-                    index: BTreeMap::new(),
                 };
                 if s.is_empty() {
                     return s;
                 }
-                s.nodes[0].num_points = s.points.len() as IdxTy;
+                s.nodes[0].num_points = s.elems.len() as IdxTy;
                 s.update_node_bounds(0);
                 s.subdivide(0, split);
                 s.nodes.truncate(s.nodes_used as usize);
                 s
             }
-            pub fn updateable(&self) -> KDTree<T, N, true, $F>
-            where
-                T: Clone,
-                $F: Clone,
-            {
-                KDTree {
-                    nodes: self.nodes.clone(),
-                    root_node_idx: 0,
-                    nodes_used: self.nodes_used,
-                    points: self.points.clone(),
-                    data: self.data.clone(),
-                    invalids: self.invalids.clone(),
-                    index: self.index.clone(),
-                }
-            }
-        }
-        impl<const N: usize, T, const AU: bool> KDTree<T, N, AU, $F> {
-            #[inline]
-            pub fn init_index(&mut self)
-            where
-                T: Ord + Copy,
-            {
-                for (ni, n) in self.nodes.iter().enumerate() {
-                    let ni = ni as IdxTy;
-                    if n.is_leaf() {
-                        let fp = n.first_point() as IdxTy;
-                        for i in fp..fp + n.num_points {
-                            self.index
-                                .entry(self.data[i as usize])
-                                .or_default()
-                                .push((ni, i));
-                        }
+            fn centroid(&self, i: usize) -> [$F; N] {
+                let mut out = [0.; N];
+                for pt in self.elems[i] {
+                    for i in 0..N {
+                        out[i] += pt[i];
                     }
                 }
+                out.map(|v| v / S as $F)
             }
-            /// Rebalances the tree after updates, deleting empty nodes.
-            pub fn rebalance(&mut self, new_points: impl Iterator<Item = ([$F; N], T)>)
-            where
-                T: Ord + Copy,
-            {
-                if self.is_empty() {
-                    return;
-                }
-                assert!(AU || self.invalids.is_empty());
-                while let Some(l) = self.invalids.pop_last() {
-                    let l = l as usize;
-                    self.points.swap_remove(l);
-                    self.data.swap_remove(l);
-                }
-                for (p, d) in new_points {
-                    self.points.push(p);
-                    self.data.push(d);
-                }
-                assert_eq!(self.points.len(), self.data.len());
+        }
 
-                let size = 2 * self.points.len() + 1;
-                for n in &mut self.nodes {
-                    *n = KDNode::<$F, N>::EMPTY;
-                }
-
-                self.nodes.resize(size, KDNode::<$F, N>::EMPTY);
-
-                self.nodes_used = 1;
-                self.nodes[0].num_points = self.points.len() as IdxTy;
-                self.update_node_bounds(0);
-                self.subdivide(0, Default::default());
-                self.nodes.truncate(self.nodes_used as usize);
-                if !self.index.is_empty() {
-                    self.index = BTreeMap::new();
-                    self.init_index();
-                }
-            }
+        impl<const N: usize, const S: usize, T> KDTree<T, N, S, $F> {
             /// Iterate over the data associated with each point
             #[inline]
             pub fn iter_data_mut(&mut self) -> impl Iterator<Item = &mut T> {
@@ -348,31 +399,31 @@ macro_rules! impl_kdtree {
             /// Returns the number of points in this KD-tree
             #[inline]
             pub fn len(&self) -> usize {
-                self.points.len()
+                self.elems.len()
             }
             /// Returns if there are no points in this KD-tree
             #[inline]
             pub fn is_empty(&self) -> bool {
-                self.points.is_empty()
+                self.elems.is_empty()
             }
             fn update_node_bounds(&mut self, idx: usize) {
                 let node = &mut self.nodes[idx];
                 let mut aabb = AABB::<$F, N>::EMPTY;
                 let fp = node.first_point();
                 for i in fp..fp + node.num_points as usize {
-                    let p = &self.points[i];
-                    if AU && self.invalids.contains(&(i as IdxTy)) {
-                        continue;
+                    for p in self.elems[i] {
+                        aabb.add_point(&p);
                     }
-                    aabb.add_point(p);
                 }
                 node.bounds = aabb.sphere();
             }
             fn midpoint_split(&self, node: &KDNode<$F, N>) -> (usize, $F) {
                 let mut aabb = AABB::<$F, N>::EMPTY;
                 let fp = node.first_point();
-                for p in &self.points[fp..fp + node.num_points as usize] {
-                    aabb.add_point(p);
+                for elem in &self.elems[fp..fp + node.num_points as usize] {
+                    for p in elem {
+                        aabb.add_point(p);
+                    }
                 }
                 let axis = aabb.largest_dimension();
                 (axis, aabb.center()[axis])
@@ -381,8 +432,10 @@ macro_rules! impl_kdtree {
                 assert!(bins > 0);
                 let mut aabb = AABB::<$F, N>::EMPTY;
                 let fp = node.first_point();
-                for p in &self.points[fp..fp + node.num_points as usize] {
-                    aabb.add_point(p);
+                for el in &self.elems[fp..fp + node.num_points as usize] {
+                    for p in el {
+                        aabb.add_point(&p);
+                    }
                 }
                 let (axis, best_pos, _) = (0..N)
                     .map(|axis| {
@@ -393,11 +446,15 @@ macro_rules! impl_kdtree {
                                 let mut left_aabb = AABB::<$F, N>::EMPTY;
                                 let mut right_aabb = AABB::<$F, N>::EMPTY;
                                 let fp = node.first_point();
-                                for p in &self.points[fp..fp + node.num_points as usize] {
-                                    if p[axis] < split_pt {
-                                        left_aabb.add_point(p);
+                                for i in fp..fp + node.num_points as usize {
+                                    let c = self.centroid(i);
+                                    let target_aabb = if c[axis] < split_pt {
+                                        &mut left_aabb
                                     } else {
-                                        right_aabb.add_point(p);
+                                        &mut right_aabb
+                                    };
+                                    for p in self.elems[i] {
+                                        target_aabb.add_point(&p);
                                     }
                                 }
                                 let vol = left_aabb
@@ -429,66 +486,6 @@ macro_rules! impl_kdtree {
                     }
                 }
             }
-            pub fn adjust_points_matching(
-                &mut self,
-                matching: &[T],
-                mut adj: impl FnMut([$F; N], T) -> UpdateKind<([$F; N], T)>,
-            ) where
-                T: Copy + Ord,
-            {
-                assert!(!self.index.is_empty());
-
-                for &m in matching {
-                    let Some(mut idxs) = self.index.remove(&m) else {
-                        continue;
-                    };
-                    let iter = idxs.extract_if(.., |&mut (ni, i)| {
-                        let i = i as usize;
-                        let ni = ni as usize;
-                        match adj(self.points[i], self.data[i]) {
-                            UpdateKind::Some((p, d)) => {
-                                // TODO maybe eagerly update parents here?
-                                if !self.nodes[ni].bounds.contains(&p) {
-                                    self.nodes[ni].bounds.add_point(&p);
-                                    let mut parent = ni.checked_sub(2);
-                                    // TODO
-                                    while let Some(p) = parent
-                                        && !self.nodes[p]
-                                            .bounds
-                                            .contains_sphere(&self.nodes[p + 2].bounds)
-                                    {
-                                        let s = self.nodes[p + 2].bounds;
-                                        self.nodes[p].bounds.add_sphere(&s);
-                                        parent = p.checked_sub(2);
-                                    }
-                                }
-                                assert!(!self.invalids.contains(&(i as IdxTy)));
-                                self.points[i] = p;
-                                self.data[i] = d;
-                                if d != m {
-                                    self.index
-                                        .entry(d)
-                                        .or_default()
-                                        .push((ni as IdxTy, i as IdxTy));
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                            UpdateKind::Delete => {
-                                self.invalids.insert(i as IdxTy);
-                                true
-                            }
-                            UpdateKind::None => false,
-                        }
-                    });
-
-                    // drain iter to ensure it's actually filtered.
-                    for _ in iter {}
-
-                    assert_eq!(self.index.insert(m, idxs), None);
-                }
-            }
             fn subdivide(&mut self, idx: usize, split_kind: SplitKind) {
                 let node = &self.nodes[idx];
                 // TODO here can use a different amount of points so it will be faster?
@@ -510,11 +507,11 @@ macro_rules! impl_kdtree {
                 let mut i = node.first_point() as usize;
                 let mut j = (i + node.num_points as usize - 1) as usize;
                 while i < j {
-                    if self.points[i][axis] < split_val {
+                    if self.centroid(i)[axis] < split_val {
                         i += 1;
                     } else {
                         self.data.swap(i, j);
-                        self.points.swap(i, j);
+                        self.elems.swap(i, j);
                         j -= 1;
                     }
                 }
@@ -542,7 +539,7 @@ macro_rules! impl_kdtree {
             /// Returns the nearest point, dist to point, and the associated data with the
             /// point.
             #[inline]
-            pub fn nearest(&self, p: &[$F; N]) -> Option<(&[$F; N], $F, &T)> {
+            pub fn nearest(&self, p: &[$F; N]) -> Option<(&[[$F; N]; S], $F, &T)> {
                 self.nearest_filter(p, |_| true)
             }
             #[inline]
@@ -550,7 +547,7 @@ macro_rules! impl_kdtree {
                 &self,
                 p: &[$F; N],
                 filter: impl Fn(&T) -> bool,
-            ) -> Option<(&[$F; N], $F, &T)> {
+            ) -> Option<(&[[$F; N]; S], $F, &T)> {
                 self.nearest_filter_top_k::<1>(p, <$F>::INFINITY, filter)[0]
             }
             /// Filter allows for skipping elements which return false.
@@ -559,7 +556,7 @@ macro_rules! impl_kdtree {
                 p: &[$F; N],
                 ball_radius: $F,
                 filter: impl Fn(&T) -> bool,
-            ) -> [Option<(&[$F; N], $F, &T)>; K] {
+            ) -> [Option<(&[[$F; N]; S], $F, &T)>; K] {
                 if K == 0 {
                     // Need K for type checking
                     return [None; K];
@@ -607,14 +604,11 @@ macro_rules! impl_kdtree {
                         let fp = node.first_point();
                         for i in fp..fp + node.num_points as usize {
                             let i = i as usize;
-                            if AU && self.invalids.contains(&(i as IdxTy)) {
-                                continue;
-                            }
                             if !filter(&self.data[i]) {
                                 continue;
                             }
-                            let pt = unsafe { self.points.get_unchecked(i) };
-                            let d = Dist::<$F>::dist(pt, p);
+                            let pt = unsafe { self.elems.get_unchecked(i) };
+                            let d = SimplexDist::<$F, S>::dist(pt, p);
                             if d < curr_bests[K - 1].1 {
                                 curr_bests[K - 1] = (i, d);
                                 curr_bests.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -647,7 +641,7 @@ macro_rules! impl_kdtree {
                 }
 
                 curr_bests.map(|(idx, dist)| {
-                    (idx != EMPTY).then(|| (&self.points[idx], dist, &self.data[idx]))
+                    (idx != EMPTY).then(|| (&self.elems[idx], dist, &self.data[idx]))
                 })
             }
         }
@@ -657,7 +651,7 @@ macro_rules! impl_kdtree {
 impl_kdtree!(f32);
 impl_kdtree!(f64);
 
-impl<F: std::fmt::Display + Copy, T, const N: usize, const AU: bool> KDTree<T, N, AU, F> {
+impl<F: std::fmt::Display + Copy, T, const N: usize> KDTree<T, N, 1, F> {
     pub fn save_as_ply(&self, filename: &str) -> std::io::Result<()> {
         use std::fs::File;
         use std::io::{BufWriter, Write};
@@ -665,19 +659,15 @@ impl<F: std::fmt::Display + Copy, T, const N: usize, const AU: bool> KDTree<T, N
         let mut f = BufWriter::new(f);
         writeln!(f, "ply")?;
         writeln!(f, "format ascii 1.0")?;
-        writeln!(f, "element vertex {}", self.points.len())?;
+        writeln!(f, "element vertex {}", self.elems.len())?;
         writeln!(f, "property float x")?;
         writeln!(f, "property float y")?;
         writeln!(f, "property float z")?;
         writeln!(f, "end_header")?;
-        for &pt in &self.points {
+        for &pt in self.points() {
             writeln!(f, "{} {} {}", pt[0], pt[1], pt[2])?;
         }
         Ok(())
-    }
-    #[inline]
-    pub fn points_iter(&self) -> impl Iterator<Item = &[F; N]> {
-        self.points.iter()
     }
 }
 
@@ -685,7 +675,7 @@ impl<F: std::fmt::Display + Copy, T, const N: usize, const AU: bool> KDTree<T, N
 fn test_new_kdtree() {
     let pts = (0..100000)
         .map(|i| [(i as f32).sin(), (i as f32).cos()])
-        .map(|p| (p, ()));
+        .map(|p| ([p], ()));
     let kdt = KDTree::<(), 2>::new(pts, Default::default());
     println!("{:?}", kdt.nodes_used);
 
@@ -703,7 +693,7 @@ fn test_correct() {
                 (i as f32 * 239.73 + 3.18 * n as f32).cos(),
             ]
         });
-        let kd_vals = pts.clone().map(|v| (v, ()));
+        let kd_vals = pts.clone().map(|v| ([v], ()));
         let kdt = KDTree::<(), 2>::new(kd_vals, Default::default());
         for probe in probes {
             let (found_nearest, d, _) = kdt.nearest(&probe).unwrap();
@@ -713,10 +703,10 @@ fn test_correct() {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .unwrap()
                 .0;
-            assert!((Dist::<f32>::dist(&probe, found_nearest) - d).abs() < 1e-8);
-            if naive_nearest != *found_nearest {
-                let d0 = Dist::<f32>::dist(&probe, &naive_nearest);
-                let d1 = Dist::<f32>::dist(&probe, &found_nearest);
+            assert!((Dist::<f32>::dist(&found_nearest[0], &probe) - d).abs() < 1e-8);
+            if naive_nearest != found_nearest[0] {
+                let d0 = Dist::<f32>::dist(&naive_nearest, &probe);
+                let d1 = Dist::<f32>::dist(&found_nearest[0], &probe);
                 assert_eq!(d0, d1);
             }
         }
@@ -734,7 +724,7 @@ fn test_dense_3d() {
             ]
         })
         .collect::<Vec<_>>();
-    let kd_vals = pts.iter().map(|&v| (v, ()));
+    let kd_vals = pts.iter().map(|&v| ([v], ()));
 
     let kdt = KDTree::<(), 3>::new(kd_vals, Default::default());
 
@@ -752,8 +742,8 @@ fn test_dense_3d() {
             .map(|pt| (pt, Dist::<f32>::dist(&p, &pt)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .unwrap();
-        if naive_nearest != found_nearest {
-            assert_eq!(naive_dist, Dist::<f32>::dist(&found_nearest, &p));
+        if *naive_nearest != found_nearest[0] {
+            assert_eq!(naive_dist, Dist::<f32>::dist(&found_nearest[0], &p));
         }
     }
 }
@@ -771,7 +761,7 @@ fn bench_kdtree(b: &mut test::Bencher) {
             (i * 0.3).sin(),
             (i * 0.12).cos(), /**/
         ];
-        (p, ())
+        ([p], ())
     });
 
     use core::hint::black_box;
